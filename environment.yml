@@ -1,0 +1,111 @@
+name: DiffMICv2
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Core
+  - python=3.8
+  - pip=23.1.2
+  - setuptools=67.8.0
+  - wheel=0.38.4
+
+  # PyTorch + CUDA
+  - pytorch=1.13.0
+  - torchvision=0.14.0
+  - torchaudio=0.13.0
+  - pytorch-cuda=11.7
+
+  # MKL / BLAS
+  - mkl=2023.1.0
+  - mkl-service
+  - mkl_fft
+  - mkl_random
+
+  # Conda basics
+  - ca-certificates
+  - openssl
+  - zlib
+  - xz
+  - lz4-c
+  - zstd
+  - libffi
+
+  # Image/Media
+  - ffmpeg
+  - jpeg
+  - libpng
+  - libtiff
+  - freetype
+  - pillow=9.3.0
+
+  # Pip section
+  - pip:
+      - absl-py==1.4.0
+      - accelerate==0.22.0
+      - addict==2.4.0
+      - aiofiles==23.1.0
+      - aiohttp==3.8.5
+      - aiosignal==1.3.1
+      - altair==5.0.1
+      - annotated-types==0.5.0
+      - anyio==3.7.1
+      - asttokens==2.2.1
+      - async-timeout==4.0.2
+      - attrs==23.1.0
+      - augmentor==0.2.12
+      - brisque==0.0.16
+      - cachetools==5.3.1
+      - click==8.1.6
+      - contourpy==1.1.0
+      - cryptography==39.0.1
+      - diffusers==0.20.2
+      - einops==0.6.0
+      - ema-pytorch==0.2.3
+      - fastapi==0.100.0
+      - filelock==3.12.2
+      - fonttools==4.41.0
+      - fsspec==2023.6.0
+      - gradio==3.38.0
+      - gradio-client==0.2.10
+      - huggingface-hub==0.16.4
+      - imageio==2.31.3
+      - importlib-metadata==6.8.0
+      - ipython==8.12.2
+      - jinja2==3.1.2
+      - joblib==1.3.2
+      - jsonschema==4.18.4
+      - lightning-utilities==0.9.0
+      - loguru==0.7.2
+      - lpips==0.1.4
+      - matplotlib==3.7.2
+      - networkx==3.1
+      - numpy==1.23.5
+      - opencv-python==4.6.0.66
+      - orjson==3.9.2
+      - packaging==23.1
+      - pandas==2.0.3
+      - protobuf==3.20.1
+      - pydantic==2.0.3
+      - pydub==0.25.1
+      - pytorch-lightning==1.9.5
+      - regex==2023.8.8
+      - requests==2.29.0
+      - safetensors==0.3.3
+      - scikit-image==0.21.0
+      - scikit-learn==1.3.2
+      - scipy==1.9.3
+      - seaborn==0.13.1
+      - tensorboard==2.13.0
+      - tensorboardx==2.5.1
+      - timm==0.9.12
+      - torchcam==0.3.0
+      - torchdiffeq==0.2.3
+      - torchmetrics==1.1.1
+      - torchprofile==0.0.4
+      - torchsummaryx==1.3.0
+      - tqdm==4.65.0
+      - uvicorn==0.23.1
+      - yapf==0.40.2
