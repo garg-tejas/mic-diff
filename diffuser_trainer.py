@@ -6,6 +6,11 @@ os.environ['NCCL_P2P_DISABLE'] = '1'
 os.environ['NCCL_IB_DISABLE'] = '1'
 os.environ['NCCL_SHM_DISABLE'] = '1'
 os.environ['NCCL_DEBUG'] = 'WARN'
+os.environ['NCCL_TIMEOUT'] = '1800'
+os.environ['NCCL_BLOCKING_WAIT'] = '1'
+os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'
+os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'OFF'
+os.environ['TORCH_SHOW_CPP_STACKTRACES'] = '1'
 import warnings
 warnings.filterwarnings("ignore", message="No audio backend is available.")
 warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
@@ -161,6 +166,7 @@ class CoolSystem(pl.LightningModule):
         
         if batch_idx % 5 == 0:
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         
         with torch.no_grad():
             y0_aux, y0_aux_global, y0_aux_local, patches, attns, attn_map = self.aux_model(x_batch)
@@ -193,6 +199,11 @@ class CoolSystem(pl.LightningModule):
         
         accumulation_steps = getattr(self.params.training, 'gradient_accumulation_steps', 1)
         loss = loss / accumulation_steps
+
+        # Additional cleanup to prevent DDP hangs
+        if batch_idx % 10 == 0:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
         self.log("train_loss",loss,prog_bar=True)
         return {"loss":loss}
@@ -306,6 +317,7 @@ class CoolSystem(pl.LightningModule):
             dataset_for_val,
             batch_size=self.params.testing.batch_size,
             shuffle=False,
+            drop_last=True,
             num_workers=self.params.data.num_workers,
             pin_memory=True,
             prefetch_factor=2,
@@ -319,6 +331,7 @@ class CoolSystem(pl.LightningModule):
             test_dataset,
             batch_size=self.params.testing.batch_size,
             shuffle=False,
+            drop_last=True,
             num_workers=self.params.data.num_workers,
             pin_memory=True,
             prefetch_factor=2,
@@ -409,7 +422,14 @@ def main(custom_config=None):
     accumulation_steps = getattr(config.training, 'gradient_accumulation_steps', 1)
     
     num_devices = 2
-    strategy = DDPStrategy(find_unused_parameters=True) if num_devices > 1 else "auto"
+    strategy = DDPStrategy(
+        find_unused_parameters=True,
+        gradient_as_bucket_view=True,
+        timeout=timedelta(minutes=30),
+        static_graph=False,
+        ddp_comm_hook=None,
+        model_averaging_period=1000
+    ) if num_devices > 1 else "auto"
     
     trainer = pl.Trainer(
         check_val_every_n_epoch=10,
@@ -431,3 +451,4 @@ def main(custom_config=None):
     trainer.fit(model,ckpt_path=resume_checkpoint_path)
 if __name__ == '__main__':
     main()
+    

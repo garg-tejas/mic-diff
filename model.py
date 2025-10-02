@@ -127,6 +127,8 @@ class ConditionalModel(nn.Module):
         self.lin3 = ConditionalConv2d(feature_dim, feature_dim, n_steps)
         self.unetnorm3 = nn.GroupNorm(32, feature_dim)
         self.lin4 = nn.Conv2d(feature_dim, y_dim, kernel_size=1, stride=1)
+        # Learnable attention weights for image feature fusion (Eq. 6 from paper)
+        self.fusion_attention = nn.Parameter(torch.randn((feature_dim, 7)), requires_grad=True)
         self.cond_weight = nn.Parameter(torch.randn((1, feature_dim, 7)), requires_grad=True)
 
         
@@ -145,11 +147,17 @@ class ConditionalModel(nn.Module):
         y = self.unetnorm1(y)
         y = F.softplus(y)
         
-        x_l = x_l.reshape(bz , np, x_l.shape[1]).permute(0,2,1)
-        x = torch.cat([x.unsqueeze(-1),x_l],dim=-1)
-        w = torch.softmax(self.cond_weight,dim=2)
-        x_weight = torch.sum(x*w,dim=-1)
-        y = x_weight.unsqueeze(-1).unsqueeze(-1) * y
+        # Proper fusion implementation (Eq. 6 from paper): F = Σ(Q ⊙ [F_raw, F_roi^1, ..., F_roi^6])
+        x_l = x_l.reshape(bz, np, x_l.shape[1]).permute(0,2,1)  # [bz, feature_dim, np]
+        x_raw = x.unsqueeze(-1)  # [bz, feature_dim, 1] - raw image features
+        x_features = torch.cat([x_raw, x_l], dim=-1)  # [bz, feature_dim, 7] - concat raw + 6 ROI features
+        
+        # Apply learnable attention weights Q ∈ R^(H×7)
+        Q = torch.softmax(self.fusion_attention, dim=1)  # Normalize attention weights
+        x_fused = torch.sum(x_features * Q.unsqueeze(0), dim=-1)  # [bz, feature_dim] - fused features
+        
+        # Apply fused features to denoising process
+        y = x_fused.unsqueeze(-1).unsqueeze(-1) * y
         
         y = self.lin2(y, t)
         y = self.unetnorm2(y)
