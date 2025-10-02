@@ -15,6 +15,23 @@ import json, numbers
 from glob import glob
 import pickle
 
+class MedicalPreprocessing:
+    def __call__(self, img):
+
+        img_np = np.array(img)
+
+        if len(img_np.shape) == 3:
+            green = img_np[:, :, 1]
+        else:
+            green = img_np
+        
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        enhanced = clahe.apply(green)
+        
+        denoised = cv2.GaussianBlur(enhanced, (3, 3), 0)
+        
+        return Image.fromarray(denoised).convert('RGB')
+
 class APTOSDataset(Dataset):
     def __init__(self, data_list, train=True, dataroot="./dataset/APTOS2019/"):
         self.trainsize = (224,224)
@@ -25,37 +42,33 @@ class APTOSDataset(Dataset):
         self.data_list = tr_dl
 
         self.size = len(self.data_list)
-        #print(self.size)
         if train:
             self.transform_center = transforms.Compose([
                 trans.CropCenterSquare(),
                 transforms.Resize(self.trainsize),
-                #trans.CenterCrop(self.trainsize),
+                MedicalPreprocessing(),
                 trans.RandomHorizontalFlip(),
                 trans.RandomVerticalFlip(),
                 trans.RandomRotation(30),
-                # transforms.GaussianBlur(3),
-                #trans.adjust_light(),
                 transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+                transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
                 ])
         else:
             self.transform_center = transforms.Compose([
                 trans.CropCenterSquare(),
                 transforms.Resize(self.trainsize),
-                #trans.CenterCrop(self.trainsize),
+                MedicalPreprocessing(),
                 transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+                transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
                 ])
-
-        #self.depths_transform = transforms.Compose([transforms.Resize((self.trainsize, self.trainsize)),transforms.ToTensor()])
 
     def __getitem__(self, index):
         data_pac = self.data_list[index]
         img_path = data_pac['img_root']
-        # Construct absolute path from relative path and dataroot
-        full_img_path = os.path.join(self.dataroot, img_path)
-        #cl_img, cr_img, ml_img, mr_img = None
+        if os.path.isabs(img_path):
+            full_img_path = img_path
+        else:
+            full_img_path = os.path.join(self.dataroot, img_path)
         img = Image.open(full_img_path).convert('RGB')
 
         img_torch = self.transform_center(img)
@@ -64,58 +77,6 @@ class APTOSDataset(Dataset):
 
         
         return img_torch, label
-
-    def __len__(self):
-        return self.size
-
-class ISICDataset(Dataset):
-    def __init__(self, data_list, train=True, dataroot="./dataset/HAM1000/"):
-        self.trainsize = (224,224)
-        self.train = train
-        self.dataroot = dataroot
-        with open(data_list, "rb") as f:
-            tr_dl = pickle.load(f)
-        self.data_list = tr_dl
-
-        self.size = len(self.data_list)
-
-        if train:
-            self.transform_center = transforms.Compose([
-                trans.CropCenterSquare(),
-                transforms.Resize(self.trainsize),
-                #trans.CenterCrop(self.trainsize),
-                trans.RandomHorizontalFlip(),
-                #trans.RandomVerticalFlip(),
-                trans.RandomRotation(30),
-                #trans.adjust_light(),
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-                ])
-        else:
-            self.transform_center = transforms.Compose([
-                trans.CropCenterSquare(),
-                transforms.Resize(self.trainsize),
-                #trans.CenterCrop(self.trainsize),
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-                ])
-        #self.depths_transform = transforms.Compose([transforms.Resize((self.trainsize, self.trainsize)),transforms.ToTensor()])
-
-    def __getitem__(self, index):
-        data_pac = self.data_list[index]
-        img_path = data_pac['img_root']
-        # Construct absolute path from relative path and dataroot
-        full_img_path = os.path.join(self.dataroot, img_path)
-        #cl_img, cr_img, ml_img, mr_img = None
-        img = Image.open(full_img_path).convert('RGB')
-
-        img_torch = self.transform_center(img)
-
-        label = int(data_pac['label'])
-
-        
-        return img_torch, label
-
 
     def __len__(self):
         return self.size

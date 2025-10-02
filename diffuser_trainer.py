@@ -1,14 +1,16 @@
 from typing import Optional
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Changed from '6' to '0' for single GPU setup
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+os.environ['NCCL_P2P_DISABLE'] = '1'
+os.environ['NCCL_IB_DISABLE'] = '1'
+os.environ['NCCL_SHM_DISABLE'] = '1'
+os.environ['NCCL_DEBUG'] = 'WARN'
 import warnings
-# Suppress torchaudio backend warning
 warnings.filterwarnings("ignore", message="No audio backend is available.")
-# Suppress sklearn metrics warnings during early training
 warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
 warnings.filterwarnings("ignore", message="Precision is ill-defined and being set to 0.0")
 warnings.filterwarnings("ignore", message="Recall is ill-defined and being set to 0.0")
-# Suppress PyTorch Lightning DataLoader worker warning (we've optimized for RTX 4050)
 warnings.filterwarnings("ignore", message=".*does not have many workers.*")
 import numpy as np
 from pathlib import Path
@@ -28,10 +30,10 @@ from pytorch_lightning import callbacks
 from pytorch_lightning.accelerators import accelerator
 from pytorch_lightning.core.hooks import CheckpointHooks
 from pytorch_lightning.callbacks import ModelCheckpoint,DeviceStatsMonitor,EarlyStopping,LearningRateMonitor
-from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.loggers import TensorBoardLogger
 from argparse import Namespace
-
+from pytorch_lightning.strategies import DDPStrategy
+from datetime import timedelta
 from torch.utils.data import DataLoader
 import pipeline
 
@@ -41,7 +43,6 @@ output_dir = 'logs'
 version_name='Baseline'
 logger = TensorBoardLogger(name='aptos',save_dir = output_dir )
 import matplotlib.pyplot as plt
-# import tent
 import math
 from pretraining.dcg import DCG as AuxCls
 from model import *
@@ -65,22 +66,17 @@ class CoolSystem(pl.LightningModule):
         self.diff_opt = config
 
         self.model = ConditionalModel(self.params, guidance=self.params.diffusion.include_guidance)
+        self.model.gradient_checkpointing = False
         self.aux_model = AuxCls(self.params)
         
-        # Use dataset-specific auxiliary model if available
         dataset_name = self.params.data.dataset.lower()
         dataset_specific_models = {
             'aptos': 'pretraining/ckpt/aptos_aux_model.pth',
-            'isic': 'pretraining/ckpt/isic_aux_model.pth',
-            'placental': 'pretraining/ckpt/placental_aux_model.pth'
         }
-        
-        # Try dataset-specific model first, fallback to placental
-        aux_model_path = dataset_specific_models.get(dataset_name, 'pretraining/ckpt/placental_aux_model.pth')
+        aux_model_path = dataset_specific_models.get(dataset_name, 'pretraining/ckpt/aptos_aux_model.pth')
         
         if not os.path.exists(aux_model_path):
             print(f"Warning: dataset-specific model not found: {aux_model_path}")
-            # Try fallback models
             for fallback_name, fallback_path in dataset_specific_models.items():
                 if os.path.exists(fallback_path):
                     print(f"Using fallback model: {fallback_path}")
@@ -110,9 +106,7 @@ class CoolSystem(pl.LightningModule):
         self.DiffSampler.scheduler.diff_chns = self.params.data.num_classes
 
     def configure_optimizers(self):
-        # REQUIRED
         optimizer = get_optimizer(self.params.optim, filter(lambda p: p.requires_grad, self.model.parameters()))
-        # optimizer = Lion(filter(lambda p: p.requires_grad, self.model.parameters()), lr=self.initlr,betas=[0.9,0.99],weight_decay=0)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.epochs, eta_min=self.initlr * 0.01)
 
         return [optimizer], [scheduler]
@@ -124,10 +118,8 @@ class CoolSystem(pl.LightningModule):
             checkpoint = torch.load(ckpt_path,map_location=self.device)[0]
             checkpoint_model = checkpoint
             state_dict = self.aux_model.state_dict()
-            # # 1. filter out unnecessary keys
             checkpoint_model = {k: v for k, v in checkpoint_model.items() if k in state_dict.keys()}
             print(checkpoint_model.keys())
-            # 2. overwrite entries in the existing state dict
             state_dict.update(checkpoint_model)
             
             self.aux_model.load_state_dict(state_dict) 
@@ -165,17 +157,13 @@ class CoolSystem(pl.LightningModule):
         x_batch, y_batch = batch
         y_batch, _ = cast_label_to_one_hot_and_prototype(y_batch, self.params)
         y_batch = y_batch.cuda()
-        #bicubic = bicubic.cuda()
         x_batch = x_batch.cuda()
         
-        # Memory optimization: clear cache
-        torch.cuda.empty_cache()
+        if batch_idx % 5 == 0:
+            torch.cuda.empty_cache()
         
         with torch.no_grad():
             y0_aux, y0_aux_global, y0_aux_local, patches, attns, attn_map = self.aux_model(x_batch)
-            # y0_aux_global,y0_aux_local = y0_aux_global.softmax(1),y0_aux_local.softmax(1)
-        # loss_aux = self.aux_cost_function(y0_aux,y_batch)
-        # loss_aux.backward()
         
         bz, nc, H, W = attn_map.size()
         bz, np = attns.size()
@@ -193,7 +181,6 @@ class CoolSystem(pl.LightningModule):
         attns = attns.unsqueeze(-1)
         attns = (attns*attns.transpose(1,2)).unsqueeze(1)
         
-        # Use gradient checkpointing for memory efficiency
         if hasattr(self.model, 'gradient_checkpointing') and self.model.gradient_checkpointing:
             noise_pred = torch.utils.checkpoint.checkpoint(self.model, x_batch, y_fusion, timesteps, patches, attns)
         else:
@@ -202,27 +189,20 @@ class CoolSystem(pl.LightningModule):
         noise = noise.view(bz,np*np,-1).permute(0,2,1).reshape(bz,nc,np,np)
         loss = self.diffusion_focal_loss(y0_aux,y_batch,noise_pred,noise)
 
-        # Scale loss by accumulation steps for gradient accumulation
+        del noise_pred, noisy_y, y_fusion, y_map, y0_cond
+        
         accumulation_steps = getattr(self.params.training, 'gradient_accumulation_steps', 1)
         loss = loss / accumulation_steps
 
         self.log("train_loss",loss,prog_bar=True)
         return {"loss":loss}
 
-    # def validation_step_end(self,step_output):
-    #     model_state_dict = self.model.state_dict()
-    #     torch.save(model_state_dict, os.path.join(self.save_path,'ckp.pth'))
-    #     print('checkpoint save!')
-    #     ema_model_state_dict = self.ema_model.state_dict()
-    #     for key in model_state_dict:
-    #         ema_model_state_dict[key] = 0.999*ema_model_state_dict[key] + 0.001*model_state_dict[key]
-    #     self.ema_model.load_state_dict(ema_model_state_dict)
     def on_validation_epoch_end(self):
         if len(self.gts) == 0 or len(self.preds) == 0:
             return
         gt = torch.cat(self.gts)
         pred = torch.cat(self.preds)
-        ACC, BACC, Prec, Rec, F1, AUC_ovo, kappa = compute_isic_metrics(gt, pred)
+        ACC, BACC, Prec, Rec, F1, AUC_ovo, kappa = compute_metric(gt, pred)
 
         self.log('accuracy',ACC)
         self.log('f1',F1)
@@ -240,7 +220,7 @@ class CoolSystem(pl.LightningModule):
             return
         gt = torch.cat(self.test_gts)
         pred = torch.cat(self.test_preds)
-        ACC, BACC, Prec, Rec, F1, AUC_ovo, kappa = compute_isic_metrics(gt, pred)
+        ACC, BACC, Prec, Rec, F1, AUC_ovo, kappa = compute_metric(gt, pred)
 
         self.log('test_accuracy',ACC)
         self.log('test_f1',F1)
@@ -308,9 +288,11 @@ class CoolSystem(pl.LightningModule):
             train_dataset,
             batch_size=self.params.training.batch_size,
             shuffle=True,
+            drop_last=True,
             num_workers=self.params.data.num_workers,
             pin_memory=True,
-            persistent_workers=True,
+            prefetch_factor=2,
+            persistent_workers=False,
         )
         return train_loader
 
@@ -326,7 +308,8 @@ class CoolSystem(pl.LightningModule):
             shuffle=False,
             num_workers=self.params.data.num_workers,
             pin_memory=True,
-            persistent_workers=True,
+            prefetch_factor=2,
+            persistent_workers=False,
         )
         return val_loader
 
@@ -338,7 +321,8 @@ class CoolSystem(pl.LightningModule):
             shuffle=False,
             num_workers=self.params.data.num_workers,
             pin_memory=True,
-            persistent_workers=True,
+            prefetch_factor=2,
+            persistent_workers=False,
         )
         return test_loader
 
@@ -346,7 +330,6 @@ class CoolSystem(pl.LightningModule):
 def main(custom_config=None):
     import argparse
     
-    # Parse command line arguments
     parser = argparse.ArgumentParser(description='Train DiffMICv2 on medical datasets')
     parser.add_argument('--config', type=str, default='configs/aptos.yml', 
                        help='Path to config file (default: configs/aptos.yml)')
@@ -356,7 +339,6 @@ def main(custom_config=None):
                        help='Specific checkpoint path to resume from')
     args = parser.parse_args()
     
-    # Use custom config if provided (for programmatic calls)
     if custom_config is not None:
         config = custom_config
         config_path = "custom_config"
@@ -364,7 +346,6 @@ def main(custom_config=None):
         config_path = args.config
         print(f"Loading config from: {config_path}")
         
-        # Check if config file exists
         if not os.path.exists(config_path):
             print(f"Config file not found: {config_path}")
             print("Available configs:")
@@ -378,19 +359,16 @@ def main(custom_config=None):
             params = yaml.safe_load(f)
         config = EasyDict(params)
     
-    # Setup resume checkpoint
     RESUME = args.resume
     if args.checkpoint:
         resume_checkpoint_path = args.checkpoint
     else:
-        # Auto-detect checkpoint based on dataset
         dataset_name = config.data.dataset.lower()
         resume_checkpoint_path = f'logs/{dataset_name}/version_0/checkpoints/last.ckpt'
     
     if not RESUME:
         resume_checkpoint_path = None
 
-    # Set random seeds
     seed = 10
     torch.manual_seed(seed)
     random.seed(seed)
@@ -399,16 +377,18 @@ def main(custom_config=None):
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = True
     
-    # Set optimal matmul precision for RTX 3050 Tensor Cores
     torch.set_float32_matmul_precision('medium')
     
-    # Print dataset info
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    
     print(f"Training DiffMICv2")
     print(f"Dataset: {config.data.dataset}")
     print(f"Classes: {config.data.num_classes}")
     print(f"Epochs: {config.training.n_epochs}")
     print(f"Batch size: {config.training.batch_size}")
-    print(f"GPU: RTX 3050 4GB optimized")
+    print(f"Gradient accumulation: {getattr(config.training, 'gradient_accumulation_steps', 1)}")
+    print(f"Effective batch size: {config.training.batch_size * getattr(config.training, 'gradient_accumulation_steps', 1)}")
 
 
     # hparams = Namespace(**args)
@@ -426,31 +406,28 @@ def main(custom_config=None):
     )
     lr_monitor_callback = LearningRateMonitor(logging_interval='step')
     
-    # Get accumulation steps from config
     accumulation_steps = getattr(config.training, 'gradient_accumulation_steps', 1)
     
+    num_devices = 2
+    strategy = DDPStrategy(find_unused_parameters=True) if num_devices > 1 else "auto"
+    
     trainer = pl.Trainer(
-        check_val_every_n_epoch=5,
+        check_val_every_n_epoch=10,
         max_epochs=config.training.n_epochs,
         accelerator='gpu',
-        devices=1,
-        precision=16,  # Mixed precision for memory efficiency
+        devices=num_devices,
+        precision='16-mixed',
         logger=logger,
-        strategy="auto",
+        strategy=strategy,
         enable_progress_bar=True,
-        log_every_n_steps=5,
-        accumulate_grad_batches=accumulation_steps,  # Gradient accumulation
-        gradient_clip_val=1.0,  # Gradient clipping for stability
-        callbacks = [checkpoint_callback,lr_monitor_callback]
+        log_every_n_steps=10,
+        accumulate_grad_batches=accumulation_steps,
+        gradient_clip_val=config.optim.grad_clip,
+        callbacks = [checkpoint_callback,lr_monitor_callback],
+        enable_model_summary=True,
+        deterministic=False,
     ) 
 
-    #train
     trainer.fit(model,ckpt_path=resume_checkpoint_path)
-    
-    #validate
-    # val_path=r'DiffMIC/logs/placental/version_4/checkpoints/placental-epoch924-accuracy-0.9350-f1-0.9327.ckpt'
-    # trainer.validate(model,ckpt_path=val_path)
-    
 if __name__ == '__main__':
-	#your code
     main()

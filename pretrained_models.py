@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Download and create specific pretrained models for APTOS and ISIC2018 datasets
+Download and create specific pretrained models for APTOS datasets
 This script provides domain-specific pretrained models for better performance
 """
 
@@ -72,44 +72,6 @@ def create_aptos_pretrained_model():
     os.makedirs('pretraining/ckpt', exist_ok=True)
     torch.save([aptos_state], 'pretraining/ckpt/aptos_aux_model.pth')
     print("Created APTOS-specific model: pretraining/ckpt/aptos_aux_model.pth")
-    
-    return True
-
-def create_isic_pretrained_model():
-    """
-    Create/download ISIC2018 (Skin Lesion) specific pretrained model
-    """
-    print("Creating ISIC2018-specific pretrained model...")
-    
-    # ISIC-specific URLs and models
-    isic_urls = [
-        {
-            "name": "HAM10000 Pretrained",
-            "url": "https://github.com/trane293/HAM10000_segmentation_and_classification",
-            "description": "Models trained on HAM10000 skin lesion dataset"
-        },
-        {
-            "name": "ISIC Challenge Winners",
-            "url": "https://challenge.isic-archive.com/",
-            "description": "Models from ISIC challenge winners"
-        }
-    ]
-    
-    print("Creating domain-adapted model for skin lesion classification...")
-    
-    # Use ImageNet pretrained ResNet18 adapted for dermatology
-    model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-    
-    # Modify final layer for 7 skin lesion classes
-    model.fc = nn.Linear(512, 7)
-    
-    # Create wrapper for DCG compatibility
-    isic_state = create_dcg_compatible_state(model, num_classes=7, dataset_name="isic")
-    
-    # Save model
-    os.makedirs('pretraining/ckpt', exist_ok=True)
-    torch.save([isic_state], 'pretraining/ckpt/isic_aux_model.pth')
-    print("Created ISIC2018-specific model: pretraining/ckpt/isic_aux_model.pth")
     
     return True
 
@@ -249,48 +211,6 @@ if __name__ == "__main__":
     
     with open('train_aptos.py', 'w') as f:
         f.write(aptos_script)
-    
-    # ISIC training script  
-    isic_script = '''#!/usr/bin/env python3
-"""Train DiffMICv2 on ISIC2018 Skin Lesion dataset"""
-
-import sys
-import os
-sys.path.append('.')
-
-# Import the main training script
-from diffuser_trainer import main, EasyDict
-import yaml
-
-def train_isic():
-    """Train on ISIC2018 dataset"""
-    # Load ISIC config
-    with open('configs/isic2018.yml', 'r') as f:
-        config_dict = yaml.safe_load(f)
-    
-    # Override checkpoint path for ISIC-specific model
-    config_dict['aux_model_path'] = 'pretraining/ckpt/isic_aux_model.pth'
-    
-    # Convert to EasyDict
-    config = EasyDict(config_dict)
-    
-    print("Starting ISIC2018 Skin Lesion Training...")
-    print(f"Dataset: {config.data.dataset}")
-    print(f"Classes: {config.data.num_classes}")
-    print(f"Samples: Check dataset files")
-    print(f"Epochs: {config.training.n_epochs}")
-    
-    # Run training
-    main(config)
-
-if __name__ == "__main__":
-    train_isic()
-'''
-    
-    with open('train_isic.py', 'w') as f:
-        f.write(isic_script)
-    
-    print("Created training scripts: train_aptos.py, train_isic.py")
 
 def main():
     """Main function"""
@@ -299,13 +219,10 @@ def main():
     
     print("\nYour datasets:")
     print("APTOS: Diabetic Retinopathy (5 classes, 2,564 samples)")
-    print("ISIC2018: Skin Lesions (7 classes, 7,011 samples)")
     
     print(f"\n{'='*70}")
     print("Choose action:")
     print("1. Create APTOS-specific pretrained model")
-    print("2. Create ISIC2018-specific pretrained model") 
-    print("3. Create both models")
     print("4. Download medical pretrained weights")
     print("5. Create all models and training scripts")
     
@@ -320,9 +237,6 @@ def main():
     
     if choice in ["1", "3", "5"]:
         success &= create_aptos_pretrained_model()
-    
-    if choice in ["2", "3", "5"]:  
-        success &= create_isic_pretrained_model()
     
     if choice in ["4", "5"]:
         downloaded = download_medical_pretrained_weights()
@@ -339,8 +253,6 @@ def main():
         print("\nCreated models:")
         if choice in ["1", "3", "5"]:
             print("pretraining/ckpt/aptos_aux_model.pth")
-        if choice in ["2", "3", "5"]:
-            print("pretraining/ckpt/isic_aux_model.pth")
         
         print(f"\n{'='*70}")
         print("READY TO TRAIN!")
@@ -350,17 +262,13 @@ def main():
         print("   python train_aptos.py")
         print("   OR: python diffuser_trainer.py --config configs/aptos.yml")
         
-        print("\nFor ISIC2018 (Skin Lesions):")
-        print("   python train_isic.py") 
-        print("   OR: python diffuser_trainer.py --config configs/isic2018.yml")
-        
         print(f"\n{'='*70}")
         print("MODEL QUALITY COMPARISON")
         print(f"{'='*70}")
         print("These models use:")
         print("ImageNet pretrained backbone (good baseline)")
         print("Domain-adapted architecture")
-        print("Proper class counts (5 for APTOS, 7 for ISIC)")
+        print("Proper class counts (5 for APTOS)")
         print("DCG-compatible structure")
         
         print("\nFor even better performance, consider:")

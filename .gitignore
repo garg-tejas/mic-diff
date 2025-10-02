@@ -123,6 +123,7 @@ Thumbs.db
 logs/
 weights/
 *.ckpt
-# *.pth
+*.pth
 
 EfficientSAM/
+dataset/

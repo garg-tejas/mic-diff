@@ -106,12 +106,6 @@ def get_dataset(config):
         if hasattr(config.data, "valdata") and config.data.valdata:
             val_dataset = APTOSDataset(data_list=config.data.valdata, train=False, dataroot=config.data.dataroot)
         test_dataset = APTOSDataset(data_list=config.data.testdata, train=False, dataroot=config.data.dataroot)
-    elif config.data.dataset == "ISIC":
-        train_dataset = ISICDataset(data_list=config.data.traindata, train=True, dataroot=config.data.dataroot)
-        val_dataset = None
-        if hasattr(config.data, "valdata") and config.data.valdata:
-            val_dataset = ISICDataset(data_list=config.data.valdata, train=False, dataroot=config.data.dataroot)
-        test_dataset = ISICDataset(data_list=config.data.testdata, train=False, dataroot=config.data.dataroot)
     else:
         raise NotImplementedError(
             "Options: toy (classification of two Gaussian), MNIST, FashionMNIST, CIFAR10.")
@@ -171,7 +165,7 @@ from sklearn.metrics import precision_score, recall_score, f1_score, confusion_m
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-def compute_isic_metrics(gt, pred):
+def compute_metric(gt, pred):
     gt_np = gt.cpu().detach().numpy()
     pred_np = pred.cpu().detach().numpy()
 

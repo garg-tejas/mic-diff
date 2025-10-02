@@ -18,9 +18,6 @@ class CropCenterSquare(object):
         pass
 
     def __call__(self, img):
-
-        # assert img.width == mask.width
-        # assert img.height == mask.height
         img_w, img_h = img.size
         h = min(img_h, img_w)
         crop = CenterCrop(h)
@@ -36,13 +33,9 @@ class CenterCrop(object):
             self.size = size
 
     def __call__(self, img):
-
-        # assert img.width == mask.width
-        # assert img.height == mask.height
         w, h = img.size
         th, tw = self.size
         x1 = int(round((w - tw) / 2.))
-        # y1 = int(round((h - th) / 2.))
         y1 = int(round((h - th) / 2.))
         img = img.crop((x1, y1, x1 + tw, y1 + th))
 
@@ -120,8 +113,6 @@ class RandomScaleCrop(object):
         self.crop = RandomCrop(self.size)
             
     def __call__(self, img):
-
-        #r = random.uniform(0.5, 2.0)
         w, h = img.size
         new_size = (int(w*random.uniform(1, 1.5)),int(h*random.uniform(1, 1.5)))
         return self.crop(img.resize(new_size, Image.BILINEAR))

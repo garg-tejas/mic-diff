@@ -10,19 +10,14 @@ import math
 class SR3scheduler(DDIMScheduler):
     def __init__(self, num_train_timesteps: int = 1000, beta_start: float = 0.0001,beta_end: float = 0.02, beta_schedule: str = 'linear',diff_chns=3):
         super().__init__(num_train_timesteps, beta_start ,beta_end,beta_schedule)
-        # Initialize other attributes specific to SR3scheduler class
-        # ...
         self.diff_chns = diff_chns
-        # self.config.prediction_type = "sample"
 
     def add_noise(
         self,
         original_samples: torch.FloatTensor,
         noise: torch.FloatTensor,
-        # temporal_noise: torch.FloatTensor,
         timesteps: torch.IntTensor,
     ) -> torch.FloatTensor:
-        # Make sure alphas_cumprod and timestep have same device and dtype as original_samples
         alphas_cumprod = self.alphas_cumprod.to(device=original_samples.device, dtype=original_samples.dtype)
         timesteps = timesteps.to(original_samples.device)
 
@@ -36,14 +31,10 @@ class SR3scheduler(DDIMScheduler):
         while len(sqrt_one_minus_alpha_prod.shape) < len(original_samples.shape):
             sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(-1)
 
-        # Only modify the last three channels of the tensor (assuming channels are in the second dimension)
         num_channels = original_samples.shape[1]
         if num_channels > self.diff_chns:
-            # print(num_channels)
-            # print(self.diff_chns)
             original_samples_select = original_samples[:, -self.diff_chns:].contiguous()
             noise_select = noise[:, -self.diff_chns:].contiguous()
-            # temporal_noise_select = temporal_noise[:, -self.diff_chns:].contiguous()
 
             noisy_samples_select = sqrt_alpha_prod * original_samples_select + sqrt_one_minus_alpha_prod * noise_select
 
@@ -69,27 +60,27 @@ class SR3Sampler():
     
     def __init__(self,model: torch.nn.Module, scheduler:SR3scheduler,eta: float =.0):
         self.model = model
-        # self.refine = refine
         self.scheduler = scheduler
         self.eta = eta
         
 
 
     def sample_high_res(self,x_batch: torch.Tensor, noisy_y, conditions=None):
-        "Using Diffusers built-in samplers"
         device = next(self.model.parameters()).device
         eta = torch.Tensor([self.eta]).to(device)
         x_batch=x_batch.to(device)
         y0, patches, attn = conditions[0].to(device),conditions[1].to(device),conditions[2].to(device)
         bz,nc,h,w = y0.shape
-        for t in self.scheduler.timesteps:
+        for i, t in enumerate(self.scheduler.timesteps):
             self.model.eval()
             timesteps = t * torch.ones(bz*h*w, dtype=t.dtype, device=x_batch.device)
             with torch.no_grad():
                 noise = self.model(x_batch, torch.cat([y0,noisy_y],dim=1), timesteps, patches, attn)
             noisy_y = self.scheduler.step(model_output = noise,timestep = t,  sample = noisy_y).prev_sample #eta = eta
-            del noise
-            torch.cuda.empty_cache()
+            del noise, timesteps
+            # Only clear cache every 5 steps to reduce overhead
+            if i % 5 == 0:
+                torch.cuda.empty_cache()
             
 
         return noisy_y

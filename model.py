@@ -34,13 +34,27 @@ class ConditionalConv2d(nn.Module):
     def forward(self, x, t):
         out = self.lin(x)
         bz, dim, h, w = out.size()
-        gamma = self.embed(t)
-        gamma = gamma.reshape(bz, h*w, dim).permute(0,2,1).reshape(bz,dim,h,w)
-        out = gamma*out
+        
+        t_reshaped = t.view(bz, h*w)
+        gamma = self.embed(t_reshaped)
+        gamma = gamma.permute(0, 2, 1).reshape(bz, dim, h, w)
+        
+        out = gamma * out
         return out
 
 
 from EfficientSAM.efficient_sam.build_efficient_sam import build_efficient_sam_vits, build_efficient_sam_vitt
+from EfficientSAM.efficient_sam.efficient_sam import build_efficient_sam
+
+def build_efficient_sam_vits_trainable():
+    model = build_efficient_sam(
+        encoder_patch_embed_dim=384,
+        encoder_num_heads=6,
+        checkpoint="weights/efficient_sam_vits.pt",
+    )
+    model.requires_grad_(True)
+    model.train()
+    return model
 
 class DenoiseUNet(nn.Module):
     def __init__(self, y_dim, feature_dim, n_steps, guidance=True):
@@ -69,14 +83,11 @@ class DenoiseUNet(nn.Module):
 
         w = torch.softmax(self.cond_weight,dim=2)
         x_weight = torch.sum(x*w,dim=-1)
-        # print(x_weight.shape)
         y = x_weight.unsqueeze(-1).unsqueeze(-1) * y
-        # y = x*y
         y = self.lin2(y, t)
         y = self.unetnorm2(y)
         y = F.softplus(y)
         
-        # y = x * y
         y = self.lin3(y, t)
         y = self.unetnorm3(y)
         y = F.softplus(y)
@@ -97,19 +108,14 @@ class ConditionalModel(nn.Module):
         feature_dim = config.model.feature_dim
         hidden_dim = config.model.hidden_dim
         self.guidance = guidance
+        self.gradient_checkpointing = False
         
-        # encoder for x
         self.encoder_x = SamEncoder(arch=arch, feature_dim=feature_dim, config=config)
         self.norm = nn.LayerNorm(feature_dim)
 
         self.encoder_x_l = ResNetEncoder(arch=arch, feature_dim=feature_dim, config=config, local=True)
         self.norm_l = nn.LayerNorm(feature_dim)
 
-        # gated attention
-        # self.gate = nn.Sequential(
-        #     nn.Linear(feature_dim * 2, feature_dim),
-        #     nn.Sigmoid()
-        # )
         
         if self.guidance:
             self.lin1 = ConditionalConv2d(y_dim * 2, feature_dim, n_steps)
@@ -142,10 +148,7 @@ class ConditionalModel(nn.Module):
         x_l = x_l.reshape(bz , np, x_l.shape[1]).permute(0,2,1)
         x = torch.cat([x.unsqueeze(-1),x_l],dim=-1)
         w = torch.softmax(self.cond_weight,dim=2)
-        # print(w.shape)
-        # print(x.shape)
         x_weight = torch.sum(x*w,dim=-1)
-        # print(x_weight.shape)
         y = x_weight.unsqueeze(-1).unsqueeze(-1) * y
         
         y = self.lin2(y, t)
@@ -161,13 +164,11 @@ class ConditionalModel(nn.Module):
 
 
 
-# ResNet 18 or 50 as image encoder
 class ResNetEncoder(nn.Module):
     def __init__(self, arch='resnet18', feature_dim=128, config=None, local=False):
         super(ResNetEncoder, self).__init__()
 
         self.f = []
-        #print(arch)
         if arch == 'resnet50':
             backbone = resnet50()
             self.featdim = backbone.fc.weight.shape[1]
@@ -194,7 +195,6 @@ class ResNetEncoder(nn.Module):
         for name, module in backbone.named_children():
             if name != 'fc':
                 self.f.append(module)
-        # encoder
         self.f = nn.Sequential(*self.f)
         
         self.g = nn.Linear(self.featdim, feature_dim)
@@ -215,15 +215,11 @@ class SamEncoder(nn.Module):
     def __init__(self, arch='resnet18', feature_dim=128, config=None, image_size=224):
         super(SamEncoder, self).__init__()
 
-        # Build the full SAM model but only use the image encoder part
-        self.sam_model = build_efficient_sam_vits()
-        self.featdim = 256  # EfficientSAM ViT-S actual output dimension (from neck_dims)
-        
-        # Projection layer to convert SAM features to desired feature_dim
+        self.sam_model = build_efficient_sam_vits_trainable()
+        self.featdim = 256
         self.g = nn.Conv2d(self.featdim, feature_dim, kernel_size=1, stride=1)
 
     def forward_feature(self, x):
-        # Use only the image encoder part of SAM (no point prompts needed)
         feature = self.sam_model.get_image_embeddings(x)
         feature = self.g(feature)
         feature = F.adaptive_avg_pool2d(feature, (1, 1))
