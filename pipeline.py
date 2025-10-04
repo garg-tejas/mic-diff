@@ -73,6 +73,7 @@ class SR3Sampler():
         bz,nc,h,w = y0.shape
         for i, t in enumerate(self.scheduler.timesteps):
             self.model.eval()
+            # Use uniform timesteps for inference (not heterologous)
             timesteps = t * torch.ones(bz*h*w, dtype=t.dtype, device=x_batch.device)
             with torch.no_grad():
                 noise = self.model(x_batch, torch.cat([y0,noisy_y],dim=1), timesteps, patches, attn)

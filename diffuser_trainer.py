@@ -75,23 +75,26 @@ class CoolSystem(pl.LightningModule):
         self.aux_model = AuxCls(self.params)
         
         dataset_name = self.params.data.dataset.lower()
-        dataset_specific_models = {
-            'aptos': 'pretraining/ckpt/aptos_aux_model.pth',
-        }
-        aux_model_path = dataset_specific_models.get(dataset_name, 'pretraining/ckpt/aptos_aux_model.pth')
         
-        if not os.path.exists(aux_model_path):
-            print(f"Warning: dataset-specific model not found: {aux_model_path}")
-            for fallback_name, fallback_path in dataset_specific_models.items():
-                if os.path.exists(fallback_path):
-                    print(f"Using fallback model: {fallback_path}")
-                    aux_model_path = fallback_path
-                    break
-            else:
-                print("No auxiliary model found! Run: python get_specific_pretrained_models.py")
-                raise FileNotFoundError(f"No auxiliary model available")
+        # Priority order: trained DCG > synthetic DCG > fallback
+        trained_dcg_path = 'pretraining/ckpt/aptos_aux_model_trained.pth'
+        synthetic_dcg_path = 'pretraining/ckpt/aptos_aux_model.pth'
+        
+        if os.path.exists(trained_dcg_path):
+            aux_model_path = trained_dcg_path
+            print(f"Using trained DCG model: {aux_model_path}")
+            print("This model was trained for 100 epochs as specified in the paper.")
+        elif os.path.exists(synthetic_dcg_path):
+            aux_model_path = synthetic_dcg_path
+            print(f"Using synthetic DCG model: {aux_model_path}")
+            print("Warning: This is a synthetic checkpoint, not trained DCG.")
+            print("For better performance, run: python dcg_pretraining.py")
         else:
-            print(f"Using dataset-specific model: {aux_model_path}")
+            print("No DCG model found!")
+            print("Please run one of the following:")
+            print("1. python dcg_pretraining.py  # Train DCG for 100 epochs (recommended)")
+            print("2. python pretrained_models.py  # Create synthetic DCG checkpoint")
+            raise FileNotFoundError(f"No DCG model available")
         
         self.init_weight(ckpt_path=aux_model_path)
         self.aux_model.eval()
@@ -107,7 +110,7 @@ class CoolSystem(pl.LightningModule):
             model=self.model,
             scheduler = pipeline.create_SR3scheduler(self.diff_opt['scheduler'], 'train'),
         )
-        self.DiffSampler.scheduler.set_timesteps(self.diff_opt['scheduler']['num_test_timesteps'])
+        self.DiffSampler.scheduler.set_timesteps(self.diff_opt['scheduler']['ddim_steps'])
         self.DiffSampler.scheduler.diff_chns = self.params.data.num_classes
 
     def configure_optimizers(self):
@@ -129,13 +132,8 @@ class CoolSystem(pl.LightningModule):
             
             self.aux_model.load_state_dict(state_dict) 
 
-    def diffusion_focal_loss(self, prior, targets, noise, noise_gt, gamma=1, alpha=10):
-        probs = F.softmax(prior, dim=1)
-        probs = (probs * targets).sum(dim=1)
-        weights = 1+alpha*(1 - probs) ** gamma
-        weights = weights.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-        loss = weights*(noise-noise_gt).square()
-        return loss.mean()
+    def diffusion_mse_loss(self, noise_pred, noise_gt):
+        return F.mse_loss(noise_pred, noise_gt)
 
 
 
@@ -157,7 +155,10 @@ class CoolSystem(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         self.model.train()
+        # Ensure aux_model is in eval mode and synchronized across GPUs
         self.aux_model.eval()
+        for param in self.aux_model.parameters():
+            param.requires_grad = False
         
         x_batch, y_batch = batch
         y_batch, _ = cast_label_to_one_hot_and_prototype(y_batch, self.params)
@@ -166,7 +167,8 @@ class CoolSystem(pl.LightningModule):
         
         if batch_idx % 5 == 0:
             torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
         
         with torch.no_grad():
             y0_aux, y0_aux_global, y0_aux_local, patches, attns, attn_map = self.aux_model(x_batch)
@@ -176,6 +178,7 @@ class CoolSystem(pl.LightningModule):
         
         y_map = y_batch.unsqueeze(1).expand(-1,np*np,-1).reshape(bz*np*np,nc)
         noise = torch.randn_like(y_map).to(self.device)
+        # Heterologous timestep sampling: each noise point gets independent random timestep
         timesteps = torch.randint(0, self.DiffSampler.scheduler.config.num_train_timesteps, (bz*np*np,), device=self.device).long()
 
         noisy_y = self.DiffSampler.scheduler.add_noise(y_map, timesteps=timesteps, noise=noise)
@@ -193,7 +196,7 @@ class CoolSystem(pl.LightningModule):
             noise_pred = self.model(x_batch, y_fusion, timesteps, patches, attns)
 
         noise = noise.view(bz,np*np,-1).permute(0,2,1).reshape(bz,nc,np,np)
-        loss = self.diffusion_focal_loss(y0_aux,y_batch,noise_pred,noise)
+        loss = self.diffusion_mse_loss(noise_pred,noise)
 
         del noise_pred, noisy_y, y_fusion, y_map, y0_cond
         
@@ -203,16 +206,34 @@ class CoolSystem(pl.LightningModule):
         # Additional cleanup to prevent DDP hangs
         if batch_idx % 10 == 0:
             torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
 
         self.log("train_loss",loss,prog_bar=True)
+        
+        # Add barrier for DDP synchronization
+        if self.trainer.world_size > 1:
+            torch.distributed.barrier()
+            
         return {"loss":loss}
 
     def on_validation_epoch_end(self):
         if len(self.gts) == 0 or len(self.preds) == 0:
             return
-        gt = torch.cat(self.gts)
-        pred = torch.cat(self.preds)
+        
+        # Synchronize across GPUs for distributed training
+        if self.trainer.world_size > 1:
+            # Gather all predictions and ground truths from all GPUs
+            all_gts = self.all_gather(torch.cat(self.gts))
+            all_preds = self.all_gather(torch.cat(self.preds))
+            
+            # Flatten the gathered tensors
+            gt = all_gts.view(-1, all_gts.shape[-1])
+            pred = all_preds.view(-1, all_preds.shape[-1])
+        else:
+            gt = torch.cat(self.gts)
+            pred = torch.cat(self.preds)
+            
         ACC, BACC, Prec, Rec, F1, AUC_ovo, kappa = compute_metric(gt, pred)
 
         self.log('accuracy',ACC)
@@ -224,13 +245,26 @@ class CoolSystem(pl.LightningModule):
 
         self.gts = []
         self.preds = []
-        print("Val: Accuracy {0}, F1 score {1}, Precision {2}, Recall {3}, AUROC {4}, Cohen Kappa {5}".format(ACC,F1,Prec,Rec,AUC_ovo,kappa))
+        if self.trainer.is_global_zero:  # Only print on rank 0
+            print("Val: Accuracy {0}, F1 score {1}, Precision {2}, Recall {3}, AUROC {4}, Cohen Kappa {5}".format(ACC,F1,Prec,Rec,AUC_ovo,kappa))
 
     def on_test_epoch_end(self):
         if len(self.test_gts) == 0 or len(self.test_preds) == 0:
             return
-        gt = torch.cat(self.test_gts)
-        pred = torch.cat(self.test_preds)
+            
+        # Synchronize across GPUs for distributed training
+        if self.trainer.world_size > 1:
+            # Gather all predictions and ground truths from all GPUs
+            all_gts = self.all_gather(torch.cat(self.test_gts))
+            all_preds = self.all_gather(torch.cat(self.test_preds))
+            
+            # Flatten the gathered tensors
+            gt = all_gts.view(-1, all_gts.shape[-1])
+            pred = all_preds.view(-1, all_preds.shape[-1])
+        else:
+            gt = torch.cat(self.test_gts)
+            pred = torch.cat(self.test_preds)
+            
         ACC, BACC, Prec, Rec, F1, AUC_ovo, kappa = compute_metric(gt, pred)
 
         self.log('test_accuracy',ACC)
@@ -242,12 +276,16 @@ class CoolSystem(pl.LightningModule):
 
         self.test_gts = []
         self.test_preds = []
-        print("Test: Accuracy {0}, F1 score {1}, Precision {2}, Recall {3}, AUROC {4}, Cohen Kappa {5}".format(ACC,F1,Prec,Rec,AUC_ovo,kappa))
+        if self.trainer.is_global_zero:  # Only print on rank 0
+            print("Test: Accuracy {0}, F1 score {1}, Precision {2}, Recall {3}, AUROC {4}, Cohen Kappa {5}".format(ACC,F1,Prec,Rec,AUC_ovo,kappa))
 
 
     def validation_step(self,batch,batch_idx):
         self.model.eval()
         self.aux_model.eval()
+        # Ensure aux_model parameters don't require gradients during validation
+        for param in self.aux_model.parameters():
+            param.requires_grad = False
 
 
         x_batch, y_batch = batch
@@ -273,6 +311,9 @@ class CoolSystem(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         self.model.eval()
         self.aux_model.eval()
+        # Ensure aux_model parameters don't require gradients during testing
+        for param in self.aux_model.parameters():
+            param.requires_grad = False
 
         x_batch, y_batch = batch
         y_batch, _ = cast_label_to_one_hot_and_prototype(y_batch, self.params)
@@ -423,12 +464,13 @@ def main(custom_config=None):
     
     num_devices = 2
     strategy = DDPStrategy(
-        find_unused_parameters=True,
+        find_unused_parameters=False,
         gradient_as_bucket_view=True,
         timeout=timedelta(minutes=30),
-        static_graph=False,
+        static_graph=True,
         ddp_comm_hook=None,
-        model_averaging_period=1000
+        model_averaging_period=1000,
+        process_group_backend='nccl'
     ) if num_devices > 1 else "auto"
     
     trainer = pl.Trainer(

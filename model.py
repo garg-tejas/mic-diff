@@ -75,7 +75,6 @@ class DenoiseUNet(nn.Module):
 
         
     def forward(self, x, y, t):
-
         y = self.lin1(y, t)
         y = self.unetnorm1(y)
         y = F.softplus(y)
@@ -173,7 +172,7 @@ class ConditionalModel(nn.Module):
 
 
 class ResNetEncoder(nn.Module):
-    def __init__(self, arch='resnet18', feature_dim=128, config=None, local=False):
+    def __init__(self, arch='resnet18', feature_dim=6144, config=None, local=False):
         super(ResNetEncoder, self).__init__()
 
         self.f = []
@@ -220,7 +219,7 @@ class ResNetEncoder(nn.Module):
         return feature
 
 class SamEncoder(nn.Module):
-    def __init__(self, arch='resnet18', feature_dim=128, config=None, image_size=224):
+    def __init__(self, arch='resnet18', feature_dim=6144, config=None, image_size=224):
         super(SamEncoder, self).__init__()
 
         self.sam_model = build_efficient_sam_vits_trainable()

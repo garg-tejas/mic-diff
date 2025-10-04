@@ -291,10 +291,14 @@ class GlobalNetwork(AbstractMILUnit):
     def add_layers(self):
         self.parent_module.ds_net = self.downsampling_branch
         self.parent_module.left_postprocess_net = self.postprocess_module
+        # Add projection layer to match 6144 feature dimension
+        self.parent_module.global_projection = nn.Conv2d(512, self.parameters["post_processing_dim"], kernel_size=1, stride=1)
 
     def forward(self, x):
         # retrieve results from downsampling network at all 4 levels
         last_feature_map = self.downsampling_branch.forward(x)
+        # Project to 6144 dimensions
+        last_feature_map = self.parent_module.global_projection(last_feature_map)
         # feed into postprocessing network
         cam = self.postprocess_module.forward(last_feature_map)
         return last_feature_map, cam
@@ -387,6 +391,8 @@ class LocalNetwork(AbstractMILUnit):
         :return:
         """
         self.parent_module.dn_resnet = DownsampleNetworkResNet18V1()
+        # Add projection layer to match 6144 feature dimension
+        self.parent_module.roi_projection = nn.Linear(512, 6144)
 
     def forward(self, x_crop):
         """
@@ -398,6 +404,8 @@ class LocalNetwork(AbstractMILUnit):
         res = self.parent_module.dn_resnet(x_crop.expand(-1, 3, -1 , -1))
         # global average pooling
         res = res.mean(dim=2).mean(dim=2)
+        # Project to 6144 dimensions
+        res = self.parent_module.roi_projection(res)
         return res
 
 
@@ -412,11 +420,11 @@ class AttentionModule(AbstractMILUnit):
         :return:
         """
         # The gated attention mechanism
-        self.parent_module.mil_attn_V = nn.Linear(512, 128, bias=False)
-        self.parent_module.mil_attn_U = nn.Linear(512, 128, bias=False)
+        self.parent_module.mil_attn_V = nn.Linear(6144, 128, bias=False)
+        self.parent_module.mil_attn_U = nn.Linear(6144, 128, bias=False)
         self.parent_module.mil_attn_w = nn.Linear(128, 1, bias=False)
         # classifier
-        self.parent_module.classifier_linear = nn.Linear(512, self.parameters["num_classes"], bias=False)
+        self.parent_module.classifier_linear = nn.Linear(6144, self.parameters["num_classes"], bias=False)
 
     def forward(self, h_crops):
         """

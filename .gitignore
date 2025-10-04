@@ -127,3 +127,5 @@ weights/
 
 EfficientSAM/
 dataset/
+
+.cursor/

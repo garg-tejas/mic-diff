@@ -17,7 +17,7 @@ class DCG(nn.Module):
         "cam_size": (7, 7),
         "K": parameters.model.num_k,
         "crop_shape": (32, 32),
-        "post_processing_dim":512,
+        "post_processing_dim":6144,
         "num_classes":parameters.data.num_classes,
         "use_v1_global":True,
         "percent_t": 1.0,
@@ -44,7 +44,7 @@ class DCG(nn.Module):
         self.attention_module.add_layers()
         # fusion branch
         # self.fusion_dnn = nn.Linear(1664*2, self.experiment_parameters["num_classes"], bias=False)
-        self.fusion_dnn = nn.Linear(self.experiment_parameters["post_processing_dim"]+512, self.experiment_parameters["num_classes"], bias=False)
+        self.fusion_dnn = nn.Linear(self.experiment_parameters["post_processing_dim"]+6144, self.experiment_parameters["num_classes"], bias=False)
 
 
 
