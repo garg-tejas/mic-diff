@@ -63,7 +63,7 @@ def create_aptos_pretrained_model():
     model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
     
     # Modify final layer for 5 DR classes
-    model.fc = nn.Linear(512, 5)
+    model.fc = nn.Linear(6144, 5)
     
     # Create wrapper for DCG compatibility
     aptos_state = create_dcg_compatible_state(model, num_classes=5, dataset_name="aptos")
@@ -95,7 +95,7 @@ def create_dcg_compatible_state(backbone_model, num_classes, dataset_name):
             dcg_state[f'ds_net.{key}'] = value.clone()
     
     # Post-processing network (generates class activation maps)
-    dcg_state['left_postprocess_net.gn_conv_last.weight'] = torch.randn(num_classes, 512, 1, 1)
+    dcg_state['left_postprocess_net.gn_conv_last.weight'] = torch.randn(num_classes, 6144, 1, 1)
     dcg_state['left_postprocess_net.gn_conv_last.bias'] = torch.randn(num_classes)
     
     # Local Network (for processing patches)
@@ -103,19 +103,19 @@ def create_dcg_compatible_state(backbone_model, num_classes, dataset_name):
     dcg_state['right_net.conv1.bias'] = torch.randn(32)
     dcg_state['right_net.conv2.weight'] = torch.randn(32, 32, 5, 5)
     dcg_state['right_net.conv2.bias'] = torch.randn(32)
-    dcg_state['right_net.fc1.weight'] = torch.randn(512, 32 * 6 * 6)
-    dcg_state['right_net.fc1.bias'] = torch.randn(512)
+    dcg_state['right_net.fc1.weight'] = torch.randn(6144, 32 * 6 * 6)
+    dcg_state['right_net.fc1.bias'] = torch.randn(6144)
     
     # Attention Module (Multiple Instance Learning)
-    dcg_state['mil_attn_V.weight'] = torch.randn(128, 512)
-    dcg_state['mil_attn_U.weight'] = torch.randn(128, 512)
+    dcg_state['mil_attn_V.weight'] = torch.randn(128, 6144)
+    dcg_state['mil_attn_U.weight'] = torch.randn(128, 6144)
     dcg_state['mil_attn_w.weight'] = torch.randn(1, 128)
     
     # Final classifier (use backbone's final layer weights if compatible)
     if f'fc.weight' in backbone_state and backbone_state['fc.weight'].shape[0] == num_classes:
         dcg_state['classifier_linear.weight'] = backbone_state['fc.weight'].clone()
     else:
-        dcg_state['classifier_linear.weight'] = torch.randn(num_classes, 512)
+        dcg_state['classifier_linear.weight'] = torch.randn(num_classes, 6144)
     
     # Initialize new layers properly
     for key, tensor in dcg_state.items():

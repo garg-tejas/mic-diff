@@ -124,7 +124,7 @@ logs/
 weights/
 *.ckpt
 *.pth
-
+ckpt/
 EfficientSAM/
 dataset/
 

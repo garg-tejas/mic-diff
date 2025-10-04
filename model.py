@@ -195,7 +195,7 @@ class ResNetEncoder(nn.Module):
                 drop_block_rate=None,
             )
             backbone.head = nn.Sequential()
-            self.featdim = 512
+            self.featdim = 6144
 
             
 

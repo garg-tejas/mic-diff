@@ -11,6 +11,11 @@ os.environ['TORCH_NCCL_BLOCKING_WAIT'] = '1'
 os.environ['TORCH_NCCL_ASYNC_ERROR_HANDLING'] = '1'
 os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'OFF'
 os.environ['TORCH_SHOW_CPP_STACKTRACES'] = '1'
+os.environ['TORCH_DISABLE_ADDR2LINE'] = '1'
+os.environ['NCCL_TREE_THRESHOLD'] = '0'
+os.environ['NCCL_ALGO'] = 'Ring'
+os.environ['MASTER_ADDR'] = 'localhost'
+os.environ['MASTER_PORT'] = '12355'
 import warnings
 warnings.filterwarnings("ignore", message="No audio backend is available.")
 warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
@@ -53,6 +58,39 @@ from pretraining.dcg import DCG as AuxCls
 from model import *
 from utils import *
 
+# Global aux_model that's completely separate from Lightning
+_global_aux_model = None
+
+def get_aux_model(params):
+    """Get the global aux_model, creating it if it doesn't exist"""
+    global _global_aux_model
+    if _global_aux_model is None:
+        _global_aux_model = AuxCls(params)
+        # Load pretrained weights
+        aux_model_path = 'pretraining/ckpt/aptos_aux_model_trained.pth'
+        print(f"Loading trained DCG model: {aux_model_path}")
+        print("This model was trained for 100 epochs as specified in the paper.")
+        
+        checkpoint = torch.load(aux_model_path, map_location='cpu')[0]
+        checkpoint_model = checkpoint
+        state_dict = _global_aux_model.state_dict()
+        checkpoint_model = {k: v for k, v in checkpoint_model.items() if k in state_dict.keys()}
+        state_dict.update(checkpoint_model)
+        _global_aux_model.load_state_dict(state_dict)
+        
+        # Freeze the model
+        _global_aux_model.eval()
+        for param in _global_aux_model.parameters():
+            param.requires_grad = False
+        _global_aux_model.requires_grad_(False)
+        
+        # Override train method
+        original_train = _global_aux_model.train
+        def frozen_train(mode=True):
+            return original_train(False)
+        _global_aux_model.train = frozen_train
+    
+    return _global_aux_model
 
 class CoolSystem(pl.LightningModule):
     
@@ -70,35 +108,10 @@ class CoolSystem(pl.LightningModule):
         config = EasyDict(params)
         self.diff_opt = config
 
+        # Only register the main model with Lightning
         self.model = ConditionalModel(self.params, guidance=self.params.diffusion.include_guidance)
         self.model.gradient_checkpointing = False
-        self.aux_model = AuxCls(self.params)
-        
-        dataset_name = self.params.data.dataset.lower()
-        
-        # Priority order: trained DCG > synthetic DCG > fallback
-        trained_dcg_path = 'pretraining/ckpt/aptos_aux_model_trained.pth'
-        synthetic_dcg_path = 'pretraining/ckpt/aptos_aux_model.pth'
-        
-        if os.path.exists(trained_dcg_path):
-            aux_model_path = trained_dcg_path
-            print(f"Using trained DCG model: {aux_model_path}")
-            print("This model was trained for 100 epochs as specified in the paper.")
-        elif os.path.exists(synthetic_dcg_path):
-            aux_model_path = synthetic_dcg_path
-            print(f"Using synthetic DCG model: {aux_model_path}")
-            print("Warning: This is a synthetic checkpoint, not trained DCG.")
-            print("For better performance, run: python dcg_pretraining.py")
-        else:
-            print("No DCG model found!")
-            print("Please run one of the following:")
-            print("1. python dcg_pretraining.py  # Train DCG for 100 epochs (recommended)")
-            print("2. python pretrained_models.py  # Create synthetic DCG checkpoint")
-            raise FileNotFoundError(f"No DCG model available")
-        
-        self.init_weight(ckpt_path=aux_model_path)
-        self.aux_model.eval()
-
+    
         self.save_hyperparameters()
         
         self.gts = []
@@ -117,20 +130,7 @@ class CoolSystem(pl.LightningModule):
         optimizer = get_optimizer(self.params.optim, filter(lambda p: p.requires_grad, self.model.parameters()))
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.epochs, eta_min=self.initlr * 0.01)
 
-        return [optimizer], [scheduler]
-
-
-    def init_weight(self,ckpt_path=None):
-        
-        if ckpt_path:
-            checkpoint = torch.load(ckpt_path,map_location=self.device)[0]
-            checkpoint_model = checkpoint
-            state_dict = self.aux_model.state_dict()
-            checkpoint_model = {k: v for k, v in checkpoint_model.items() if k in state_dict.keys()}
-            print(checkpoint_model.keys())
-            state_dict.update(checkpoint_model)
-            
-            self.aux_model.load_state_dict(state_dict) 
+        return [optimizer], [scheduler] 
 
     def diffusion_mse_loss(self, noise_pred, noise_gt):
         return F.mse_loss(noise_pred, noise_gt)
@@ -155,11 +155,7 @@ class CoolSystem(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         self.model.train()
-        # Ensure aux_model is in eval mode and synchronized across GPUs
-        self.aux_model.eval()
-        for param in self.aux_model.parameters():
-            param.requires_grad = False
-        
+
         x_batch, y_batch = batch
         y_batch, _ = cast_label_to_one_hot_and_prototype(y_batch, self.params)
         y_batch = y_batch.cuda()
@@ -171,14 +167,24 @@ class CoolSystem(pl.LightningModule):
                 torch.cuda.synchronize()
         
         with torch.no_grad():
-            y0_aux, y0_aux_global, y0_aux_local, patches, attns, attn_map = self.aux_model(x_batch)
+            aux_model = get_aux_model(self.params)
+            aux_model = aux_model.to(self.device)
+
+            aux_model_outputs = aux_model(x_batch)
+            y0_aux, y0_aux_global, y0_aux_local, patches, attns, attn_map = aux_model_outputs
+
+            y0_aux = y0_aux.detach()
+            y0_aux_global = y0_aux_global.detach()
+            y0_aux_local = y0_aux_local.detach()
+            patches = patches.detach()
+            attns = attns.detach()
+            attn_map = attn_map.detach()
         
         bz, nc, H, W = attn_map.size()
         bz, np = attns.size()
         
         y_map = y_batch.unsqueeze(1).expand(-1,np*np,-1).reshape(bz*np*np,nc)
         noise = torch.randn_like(y_map).to(self.device)
-        # Heterologous timestep sampling: each noise point gets independent random timestep
         timesteps = torch.randint(0, self.DiffSampler.scheduler.config.num_train_timesteps, (bz*np*np,), device=self.device).long()
 
         noisy_y = self.DiffSampler.scheduler.add_noise(y_map, timesteps=timesteps, noise=noise)
@@ -203,31 +209,23 @@ class CoolSystem(pl.LightningModule):
         accumulation_steps = getattr(self.params.training, 'gradient_accumulation_steps', 1)
         loss = loss / accumulation_steps
 
-        # Additional cleanup to prevent DDP hangs
         if batch_idx % 10 == 0:
             torch.cuda.empty_cache()
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
 
-        self.log("train_loss",loss,prog_bar=True)
+        self.log("train_loss",loss,prog_bar=True, sync_dist=True)
         
-        # Add barrier for DDP synchronization
-        if self.trainer.world_size > 1:
-            torch.distributed.barrier()
-            
         return {"loss":loss}
 
     def on_validation_epoch_end(self):
         if len(self.gts) == 0 or len(self.preds) == 0:
             return
         
-        # Synchronize across GPUs for distributed training
         if self.trainer.world_size > 1:
-            # Gather all predictions and ground truths from all GPUs
             all_gts = self.all_gather(torch.cat(self.gts))
             all_preds = self.all_gather(torch.cat(self.preds))
-            
-            # Flatten the gathered tensors
+
             gt = all_gts.view(-1, all_gts.shape[-1])
             pred = all_preds.view(-1, all_preds.shape[-1])
         else:
@@ -252,13 +250,10 @@ class CoolSystem(pl.LightningModule):
         if len(self.test_gts) == 0 or len(self.test_preds) == 0:
             return
             
-        # Synchronize across GPUs for distributed training
         if self.trainer.world_size > 1:
-            # Gather all predictions and ground truths from all GPUs
             all_gts = self.all_gather(torch.cat(self.test_gts))
             all_preds = self.all_gather(torch.cat(self.test_preds))
-            
-            # Flatten the gathered tensors
+
             gt = all_gts.view(-1, all_gts.shape[-1])
             pred = all_preds.view(-1, all_preds.shape[-1])
         else:
@@ -282,17 +277,14 @@ class CoolSystem(pl.LightningModule):
 
     def validation_step(self,batch,batch_idx):
         self.model.eval()
-        self.aux_model.eval()
-        # Ensure aux_model parameters don't require gradients during validation
-        for param in self.aux_model.parameters():
-            param.requires_grad = False
-
-
         x_batch, y_batch = batch
         y_batch, _ = cast_label_to_one_hot_and_prototype(y_batch, self.params)
         y_batch = y_batch.cuda()
         x_batch = x_batch.cuda()
-        y0_aux, y0_aux_global, y0_aux_local, patches, attns, attn_map = self.aux_model(x_batch)
+        
+        aux_model = get_aux_model(self.params)
+        aux_model = aux_model.to(self.device)
+        y0_aux, y0_aux_global, y0_aux_local, patches, attns, attn_map = aux_model(x_batch)
 
         bz, nc, H, W = attn_map.size()
         bz, np = attns.size()
@@ -310,16 +302,15 @@ class CoolSystem(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         self.model.eval()
-        self.aux_model.eval()
-        # Ensure aux_model parameters don't require gradients during testing
-        for param in self.aux_model.parameters():
-            param.requires_grad = False
-
+    
         x_batch, y_batch = batch
         y_batch, _ = cast_label_to_one_hot_and_prototype(y_batch, self.params)
         y_batch = y_batch.cuda()
         x_batch = x_batch.cuda()
-        y0_aux, y0_aux_global, y0_aux_local, patches, attns, attn_map = self.aux_model(x_batch)
+        
+        aux_model = get_aux_model(self.params)
+        aux_model = aux_model.to(self.device)
+        y0_aux, y0_aux_global, y0_aux_local, patches, attns, attn_map = aux_model(x_batch)
 
         bz, nc, H, W = attn_map.size()
         bz, np = attns.size()
@@ -463,15 +454,16 @@ def main(custom_config=None):
     accumulation_steps = getattr(config.training, 'gradient_accumulation_steps', 1)
     
     num_devices = 2
-    strategy = DDPStrategy(
-        find_unused_parameters=False,
-        gradient_as_bucket_view=True,
-        timeout=timedelta(minutes=30),
-        static_graph=True,
-        ddp_comm_hook=None,
-        model_averaging_period=1000,
-        process_group_backend='nccl'
-    ) if num_devices > 1 else "auto"
+
+    try:
+        if torch.cuda.device_count() > 1:
+            strategy = "ddp_find_unused_parameters_true"
+        else:
+            strategy = "auto"
+            num_devices = 1
+    except Exception as e:
+        strategy = "auto"
+        num_devices = 1
     
     trainer = pl.Trainer(
         check_val_every_n_epoch=10,
@@ -488,6 +480,10 @@ def main(custom_config=None):
         callbacks = [checkpoint_callback,lr_monitor_callback],
         enable_model_summary=True,
         deterministic=False,
+        sync_batchnorm=True,
+        limit_train_batches=1.0,
+        limit_val_batches=1.0,
+        num_sanity_val_steps=0,
     ) 
 
     trainer.fit(model,ckpt_path=resume_checkpoint_path)
